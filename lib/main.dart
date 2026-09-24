@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:image/image.dart' as img;
 
+import 'models/correction_state.dart';
 import 'services/cmyk_processor.dart';
 
 void main() {
@@ -48,13 +49,20 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
   int? _imageWidth;
   int? _imageHeight;
 
-  double _cyan = 0;
-  double _magenta = 0;
-  double _yellow = 0;
-  double _black = 0;
+  CorrectionState _correction = CorrectionState.zero;
+
+  final List<CorrectionState> _history = [
+    CorrectionState.zero,
+  ];
+
+  int _historyIndex = 0;
 
   bool _showOriginal = false;
   bool _processing = false;
+
+  bool get _canUndo => _historyIndex > 0;
+
+  bool get _canRedo => _historyIndex < _history.length - 1;
 
   Future<void> _openImage() async {
     final result = await FilePicker.platform.pickFiles(
@@ -87,49 +95,68 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
     setState(() {
       _originalBytes = bytes;
       _processedBytes = bytes;
+
       _fileName = file.name;
       _imageWidth = decoded.width;
       _imageHeight = decoded.height;
 
-      _cyan = 0;
-      _magenta = 0;
-      _yellow = 0;
-      _black = 0;
+      _correction = CorrectionState.zero;
+
+      _history
+        ..clear()
+        ..add(CorrectionState.zero);
+
+      _historyIndex = 0;
+
       _showOriginal = false;
+      _processing = false;
     });
   }
 
-  Future<void> _updateCorrection() async {
+  Future<void> _applyCorrection(
+    CorrectionState newState, {
+    bool addToHistory = true,
+  }) async {
     if (_originalBytes == null) {
       return;
     }
 
+    if (addToHistory) {
+      if (_historyIndex < _history.length - 1) {
+        _history.removeRange(
+          _historyIndex + 1,
+          _history.length,
+        );
+      }
+
+      _history.add(newState);
+      _historyIndex = _history.length - 1;
+    }
+
     setState(() {
+      _correction = newState;
       _processing = true;
     });
 
     final result = await CmykProcessor.apply(
       _originalBytes!,
-      cyan: _cyan,
-      magenta: _magenta,
-      yellow: _yellow,
-      black: _black,
+      cyan: newState.cyan,
+      magenta: newState.magenta,
+      yellow: newState.yellow,
+      black: newState.black,
     );
 
     if (!mounted) {
       return;
     }
 
-    if (result != null) {
-      setState(() {
+    setState(() {
+      if (result != null) {
         _processedBytes = result;
-        _processing = false;
-      });
-    } else {
-      setState(() {
-        _processing = false;
-      });
-    }
+      }
+
+      _processing = false;
+    });
   }
 
   Future<void> _changeCmyk({
@@ -138,36 +165,52 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
     double? yellow,
     double? black,
   }) async {
-    setState(() {
-      if (cyan != null) {
-        _cyan = cyan;
-      }
+    final next = CorrectionState(
+      cyan: cyan ?? _correction.cyan,
+      magenta: magenta ?? _correction.magenta,
+      yellow: yellow ?? _correction.yellow,
+      black: black ?? _correction.black,
+    );
 
-      if (magenta != null) {
-        _magenta = magenta;
-      }
-
-      if (yellow != null) {
-        _yellow = yellow;
-      }
-
-      if (black != null) {
-        _black = black;
-      }
-    });
-
-    await _updateCorrection();
+    await _applyCorrection(next);
   }
 
-  void _reset() {
-    setState(() {
-      _cyan = 0;
-      _magenta = 0;
-      _yellow = 0;
-      _black = 0;
-      _processedBytes = _originalBytes;
-      _showOriginal = false;
-    });
+  Future<void> _undo() async {
+    if (!_canUndo) {
+      return;
+    }
+
+    final newIndex = _historyIndex - 1;
+    final state = _history[newIndex];
+
+    _historyIndex = newIndex;
+
+    await _applyCorrection(
+      state,
+      addToHistory: false,
+    );
+  }
+
+  Future<void> _redo() async {
+    if (!_canRedo) {
+      return;
+    }
+
+    final newIndex = _historyIndex + 1;
+    final state = _history[newIndex];
+
+    _historyIndex = newIndex;
+
+    await _applyCorrection(
+      state,
+      addToHistory: false,
+    );
+  }
+
+  Future<void> _reset() async {
+    await _applyCorrection(
+      CorrectionState.zero,
+    );
   }
 
   Future<void> _saveImage() async {
@@ -175,9 +218,16 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
       return;
     }
 
+    final baseName =
+        _fileName?.replaceFirst(
+              RegExp(r'\.[^.]+$'),
+              '',
+            ) ??
+            'image';
+
     final path = await FilePicker.platform.saveFile(
       dialogTitle: 'Save corrected image',
-      fileName: 'corrected_${_fileName ?? 'image'}.png',
+      fileName: '${baseName}_corrected.png',
       type: FileType.custom,
       allowedExtensions: ['png'],
     );
@@ -194,7 +244,7 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
 
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text('Corrected image saved'),
+        content: Text('Corrected image saved successfully'),
       ),
     );
   }
@@ -242,16 +292,18 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
           min: -100,
           max: 100,
           divisions: 200,
-          onChanged: _originalBytes == null ? null : onChanged,
+          onChanged:
+              _originalBytes == null || _processing
+                  ? null
+                  : onChanged,
         ),
       ],
     );
   }
 
   Widget _buildPreview() {
-    final bytes = _showOriginal
-        ? _originalBytes
-        : _processedBytes;
+    final bytes =
+        _showOriginal ? _originalBytes : _processedBytes;
 
     if (bytes == null) {
       return const Center(
@@ -370,9 +422,7 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
           Expanded(
             child: Text(
               value,
-              style: const TextStyle(
-                fontSize: 12,
-              ),
+              style: const TextStyle(fontSize: 12),
               overflow: TextOverflow.ellipsis,
             ),
           ),
@@ -398,7 +448,8 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
             child: SingleChildScrollView(
               padding: const EdgeInsets.all(20),
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+                crossAxisAlignment:
+                    CrossAxisAlignment.start,
                 children: [
                   const Text(
                     'CMYK CORRECTION',
@@ -415,56 +466,98 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
                       fontSize: 13,
                     ),
                   ),
-                  const SizedBox(height: 28),
+                  const SizedBox(height: 24),
 
                   _slider(
                     name: 'Cyan',
                     shortName: 'C',
-                    value: _cyan,
-                    onChanged: (value) {
-                      _changeCmyk(cyan: value);
+                    value: _correction.cyan,
+                    onChanged: (v) {
+                      _changeCmyk(cyan: v);
                     },
                   ),
 
                   _slider(
                     name: 'Magenta',
                     shortName: 'M',
-                    value: _magenta,
-                    onChanged: (value) {
-                      _changeCmyk(magenta: value);
+                    value: _correction.magenta,
+                    onChanged: (v) {
+                      _changeCmyk(magenta: v);
                     },
                   ),
 
                   _slider(
                     name: 'Yellow',
                     shortName: 'Y',
-                    value: _yellow,
-                    onChanged: (value) {
-                      _changeCmyk(yellow: value);
+                    value: _correction.yellow,
+                    onChanged: (v) {
+                      _changeCmyk(yellow: v);
                     },
                   ),
 
                   _slider(
                     name: 'Black',
                     shortName: 'K',
-                    value: _black,
-                    onChanged: (value) {
-                      _changeCmyk(black: value);
+                    value: _correction.black,
+                    onChanged: (v) {
+                      _changeCmyk(black: v);
                     },
                   ),
 
-                  const SizedBox(height: 18),
+                  const SizedBox(height: 12),
+
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed:
+                              _canUndo &&
+                                      !_processing
+                                  ? _undo
+                                  : null,
+                          icon: const Icon(
+                            Icons.undo,
+                          ),
+                          label: const Text('UNDO'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed:
+                              _canRedo &&
+                                      !_processing
+                                  ? _redo
+                                  : null,
+                          icon: const Icon(
+                            Icons.redo,
+                          ),
+                          label: const Text('REDO'),
+                        ),
+                      ),
+                    ],
+                  ),
+
+                  const SizedBox(height: 10),
 
                   SizedBox(
                     width: double.infinity,
                     child: OutlinedButton.icon(
-                      onPressed: _originalBytes == null ? null : _reset,
-                      icon: const Icon(Icons.restart_alt),
-                      label: const Text('RESET CORRECTION'),
+                      onPressed:
+                          _originalBytes == null ||
+                                  _processing
+                              ? null
+                              : _reset,
+                      icon: const Icon(
+                        Icons.restart_alt,
+                      ),
+                      label: const Text(
+                        'RESET CORRECTION',
+                      ),
                     ),
                   ),
 
-                  const SizedBox(height: 28),
+                  const SizedBox(height: 24),
 
                   const Divider(
                     color: Colors.white12,
@@ -490,8 +583,9 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
 
                   _infoRow(
                     'Resolution',
-                    _imageWidth != null && _imageHeight != null
-                        ? '${_imageWidth} × ${_imageHeight}'
+                    _imageWidth != null &&
+                            _imageHeight != null
+                        ? '${_imageWidth} × $_imageHeight'
                         : '—',
                   ),
 
@@ -499,15 +593,19 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
 
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
-                    title: const Text('Show original'),
+                    title: const Text(
+                      'Show original',
+                    ),
                     value: _showOriginal,
-                    onChanged: _originalBytes == null
-                        ? null
-                        : (value) {
-                            setState(() {
-                              _showOriginal = value;
-                            });
-                          },
+                    onChanged:
+                        _originalBytes == null
+                            ? null
+                            : (value) {
+                                setState(() {
+                                  _showOriginal =
+                                      value;
+                                });
+                              },
                   ),
                 ],
               ),
@@ -528,9 +626,14 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
               height: 48,
               child: FilledButton.icon(
                 onPressed:
-                    _processedBytes == null ? null : _saveImage,
+                    _processedBytes == null ||
+                            _processing
+                        ? null
+                        : _saveImage,
                 icon: const Icon(Icons.save),
-                label: const Text('EXPORT CORRECTED IMAGE'),
+                label: const Text(
+                  'EXPORT CORRECTED IMAGE',
+                ),
               ),
             ),
           ),
@@ -559,16 +662,40 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
           ],
         ),
         actions: [
+          IconButton(
+            tooltip: 'Undo',
+            onPressed:
+                _canUndo && !_processing
+                    ? _undo
+                    : null,
+            icon: const Icon(Icons.undo),
+          ),
+          IconButton(
+            tooltip: 'Redo',
+            onPressed:
+                _canRedo && !_processing
+                    ? _redo
+                    : null,
+            icon: const Icon(Icons.redo),
+          ),
+          const SizedBox(width: 8),
           TextButton.icon(
             onPressed: _openImage,
-            icon: const Icon(Icons.folder_open),
+            icon: const Icon(
+              Icons.folder_open,
+            ),
             label: const Text('OPEN'),
           ),
           const SizedBox(width: 8),
           TextButton.icon(
             onPressed:
-                _processedBytes == null ? null : _saveImage,
-            icon: const Icon(Icons.save_outlined),
+                _processedBytes == null ||
+                        _processing
+                    ? null
+                    : _saveImage,
+            icon: const Icon(
+              Icons.save_outlined,
+            ),
             label: const Text('SAVE'),
           ),
           const SizedBox(width: 12),
@@ -586,12 +713,14 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
               ),
               decoration: BoxDecoration(
                 color: const Color(0xFF111318),
-                borderRadius: BorderRadius.circular(12),
+                borderRadius:
+                    BorderRadius.circular(12),
                 border: Border.all(
                   color: const Color(0xFF292D33),
                 ),
               ),
-              clipBehavior: Clip.antiAlias,
+              clipBehavior:
+                  Clip.antiAlias,
               child: _buildPreview(),
             ),
           ),
@@ -600,7 +729,10 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
       ),
       bottomNavigationBar: Container(
         height: 30,
-        padding: const EdgeInsets.symmetric(horizontal: 14),
+        padding:
+            const EdgeInsets.symmetric(
+          horizontal: 14,
+        ),
         color: const Color(0xFF0A0C0F),
         child: Row(
           children: [
@@ -613,7 +745,9 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
             ),
             const SizedBox(width: 8),
             Text(
-              _processing ? 'PROCESSING' : 'READY',
+              _processing
+                  ? 'PROCESSING'
+                  : 'READY',
               style: const TextStyle(
                 fontSize: 11,
                 color: Colors.white54,
@@ -621,7 +755,9 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
             ),
             const Spacer(),
             Text(
-              _imageBytesStatus,
+              _history.length > 1
+                  ? 'History: ${_historyIndex + 1}/${_history.length}'
+                  : 'No changes',
               style: const TextStyle(
                 fontSize: 11,
                 color: Colors.white38,
@@ -631,15 +767,5 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
         ),
       ),
     );
-  }
-
-  String get _imageBytesStatus {
-    if (_originalBytes == null) {
-      return 'No image';
-    }
-
-    final kb = _originalBytes!.length / 1024;
-
-    return '${kb.toStringAsFixed(0)} KB';
   }
 }
