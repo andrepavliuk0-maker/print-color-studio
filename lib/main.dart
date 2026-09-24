@@ -6,7 +6,9 @@ import 'package:flutter/material.dart';
 import 'package:image/image.dart' as img;
 
 import 'models/correction_state.dart';
+import 'models/print_project.dart';
 import 'services/cmyk_processor.dart';
+import 'services/project_service.dart';
 
 void main() {
   runApp(const PrintColorStudioApp());
@@ -23,29 +25,27 @@ class PrintColorStudioApp extends StatelessWidget {
       theme: ThemeData(
         brightness: Brightness.dark,
         useMaterial3: true,
-        scaffoldBackgroundColor: const Color(0xFF0D0F12),
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF3D8BFF),
-          brightness: Brightness.dark,
-        ),
+        colorSchemeSeed: Colors.blue,
       ),
-      home: const ColorStudioScreen(),
+      home: const ColorStudioPage(),
     );
   }
 }
 
-class ColorStudioScreen extends StatefulWidget {
-  const ColorStudioScreen({super.key});
+class ColorStudioPage extends StatefulWidget {
+  const ColorStudioPage({super.key});
 
   @override
-  State<ColorStudioScreen> createState() => _ColorStudioScreenState();
+  State<ColorStudioPage> createState() => _ColorStudioPageState();
 }
 
-class _ColorStudioScreenState extends State<ColorStudioScreen> {
+class _ColorStudioPageState extends State<ColorStudioPage> {
   Uint8List? _originalBytes;
   Uint8List? _processedBytes;
 
   String? _fileName;
+  String? _sourcePath;
+
   int? _imageWidth;
   int? _imageHeight;
 
@@ -59,10 +59,8 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
 
   bool _showOriginal = false;
   bool _processing = false;
-
-  bool get _canUndo => _historyIndex > 0;
-
-  bool get _canRedo => _historyIndex < _history.length - 1;
+  bool _savingProject = false;
+  bool _openingProject = false;
 
   Future<void> _openImage() async {
     final result = await FilePicker.platform.pickFiles(
@@ -74,7 +72,7 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
       return;
     }
 
-    final file = result.files.first;
+    final file = result.files.single;
 
     Uint8List? bytes = file.bytes;
 
@@ -83,20 +81,22 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
     }
 
     if (bytes == null) {
+      _showMessage('Не удалось прочитать изображение.');
       return;
     }
 
     final decoded = img.decodeImage(bytes);
 
     if (decoded == null) {
+      _showMessage('Файл не является поддерживаемым изображением.');
       return;
     }
 
     setState(() {
       _originalBytes = bytes;
       _processedBytes = bytes;
-
       _fileName = file.name;
+      _sourcePath = file.path;
       _imageWidth = decoded.width;
       _imageHeight = decoded.height;
 
@@ -107,56 +107,208 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
         ..add(CorrectionState.zero);
 
       _historyIndex = 0;
-
       _showOriginal = false;
-      _processing = false;
     });
   }
 
+  Future<void> _openProject() async {
+    if (_openingProject) {
+      return;
+    }
+
+    setState(() {
+      _openingProject = true;
+    });
+
+    try {
+      final project = await ProjectService.openProject();
+
+      if (project == null) {
+        _showMessage('Не удалось открыть проект.');
+        return;
+      }
+
+      Uint8List? imageBytes;
+
+      if (project.sourcePath != null &&
+          project.sourcePath!.isNotEmpty) {
+        final sourceFile = File(project.sourcePath!);
+
+        if (await sourceFile.exists()) {
+          imageBytes = await sourceFile.readAsBytes();
+        }
+      }
+
+      if (imageBytes == null) {
+        _showMessage(
+          'Проект открыт, но исходное изображение не найдено.\n'
+          'Путь к файлу: ${project.sourcePath ?? "не указан"}',
+        );
+
+        setState(() {
+          _fileName = project.fileName;
+          _sourcePath = project.sourcePath;
+          _imageWidth = project.width;
+          _imageHeight = project.height;
+
+          _correction = CorrectionState(
+            cyan: project.cyan,
+            magenta: project.magenta,
+            yellow: project.yellow,
+            black: project.black,
+          );
+
+          _history
+            ..clear()
+            ..add(_correction);
+
+          _historyIndex = 0;
+        });
+
+        return;
+      }
+
+      final decoded = img.decodeImage(imageBytes);
+
+      if (decoded == null) {
+        _showMessage('Исходное изображение повреждено.');
+        return;
+      }
+
+      final correction = CorrectionState(
+        cyan: project.cyan,
+        magenta: project.magenta,
+        yellow: project.yellow,
+        black: project.black,
+      );
+
+      setState(() {
+        _originalBytes = imageBytes;
+        _fileName = project.fileName;
+        _sourcePath = project.sourcePath;
+        _imageWidth = decoded.width;
+        _imageHeight = decoded.height;
+
+        _correction = correction;
+
+        _history
+          ..clear()
+          ..add(correction);
+
+        _historyIndex = 0;
+        _showOriginal = false;
+      });
+
+      await _applyCorrection(
+        correction,
+        addToHistory: false,
+      );
+
+      _showMessage('Проект открыт.');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _openingProject = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _saveProject() async {
+    if (_fileName == null ||
+        _imageWidth == null ||
+        _imageHeight == null) {
+      _showMessage('Сначала откройте изображение.');
+      return;
+    }
+
+    if (_savingProject) {
+      return;
+    }
+
+    setState(() {
+      _savingProject = true;
+    });
+
+    try {
+      final project = PrintProject(
+        fileName: _fileName!,
+        sourcePath: _sourcePath,
+        width: _imageWidth!,
+        height: _imageHeight!,
+        cyan: _correction.cyan,
+        magenta: _correction.magenta,
+        yellow: _correction.yellow,
+        black: _correction.black,
+        createdAt: DateTime.now(),
+      );
+
+      final saved = await ProjectService.saveProject(project);
+
+      if (saved) {
+        _showMessage('Проект сохранён.');
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _savingProject = false;
+        });
+      }
+    }
+  }
+
   Future<void> _applyCorrection(
-    CorrectionState newState, {
+    CorrectionState correction, {
     bool addToHistory = true,
   }) async {
     if (_originalBytes == null) {
       return;
     }
 
-    if (addToHistory) {
-      if (_historyIndex < _history.length - 1) {
-        _history.removeRange(
-          _historyIndex + 1,
-          _history.length,
-        );
-      }
-
-      _history.add(newState);
-      _historyIndex = _history.length - 1;
-    }
-
     setState(() {
-      _correction = newState;
       _processing = true;
     });
 
-    final result = await CmykProcessor.apply(
-      _originalBytes!,
-      cyan: newState.cyan,
-      magenta: newState.magenta,
-      yellow: newState.yellow,
-      black: newState.black,
-    );
+    final result = await Future<Uint8List?>(() {
+      return CmykProcessor.apply(
+        _originalBytes!,
+        cyan: correction.cyan,
+        magenta: correction.magenta,
+        yellow: correction.yellow,
+        black: correction.black,
+      );
+    });
 
     if (!mounted) {
       return;
     }
 
-    setState(() {
-      if (result != null) {
+    if (result != null) {
+      setState(() {
         _processedBytes = result;
-      }
+        _correction = correction;
 
-      _processing = false;
-    });
+        if (addToHistory) {
+          if (_historyIndex < _history.length - 1) {
+            _history.removeRange(
+              _historyIndex + 1,
+              _history.length,
+            );
+          }
+
+          _history.add(correction);
+          _historyIndex = _history.length - 1;
+        }
+
+        _processing = false;
+      });
+    } else {
+      setState(() {
+        _processing = false;
+      });
+
+      _showMessage('Ошибка обработки изображения.');
+    }
   }
 
   Future<void> _changeCmyk({
@@ -176,33 +328,38 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
   }
 
   Future<void> _undo() async {
-    if (!_canUndo) {
+    if (_historyIndex <= 0 || _processing) {
       return;
     }
 
-    final newIndex = _historyIndex - 1;
-    final state = _history[newIndex];
+    final index = _historyIndex - 1;
+    final correction = _history[index];
 
-    _historyIndex = newIndex;
+    setState(() {
+      _historyIndex = index;
+    });
 
     await _applyCorrection(
-      state,
+      correction,
       addToHistory: false,
     );
   }
 
   Future<void> _redo() async {
-    if (!_canRedo) {
+    if (_historyIndex >= _history.length - 1 ||
+        _processing) {
       return;
     }
 
-    final newIndex = _historyIndex + 1;
-    final state = _history[newIndex];
+    final index = _historyIndex + 1;
+    final correction = _history[index];
 
-    _historyIndex = newIndex;
+    setState(() {
+      _historyIndex = index;
+    });
 
     await _applyCorrection(
-      state,
+      correction,
       addToHistory: false,
     );
   }
@@ -215,15 +372,16 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
 
   Future<void> _saveImage() async {
     if (_processedBytes == null) {
+      _showMessage('Сначала откройте изображение.');
       return;
     }
 
-    final baseName =
-        _fileName?.replaceFirst(
-              RegExp(r'\.[^.]+$'),
-              '',
-            ) ??
-            'image';
+    final baseName = _fileName == null
+        ? 'corrected_image'
+        : _fileName!.replaceFirst(
+            RegExp(r'\.[^.]+$'),
+            '',
+          );
 
     final path = await FilePicker.platform.saveFile(
       dialogTitle: 'Save corrected image',
@@ -232,102 +390,144 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
       allowedExtensions: ['png'],
     );
 
-    if (path == null) {
+    if (path == null || path.isEmpty) {
       return;
     }
 
-    await File(path).writeAsBytes(_processedBytes!);
+    await File(path).writeAsBytes(
+      _processedBytes!,
+      flush: true,
+    );
 
+    _showMessage('Изображение сохранено.');
+  }
+
+  void _showMessage(String message) {
     if (!mounted) {
       return;
     }
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Corrected image saved successfully'),
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+        ),
+      );
+  }
+
+  Widget _buildTopBar() {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: 16,
+        vertical: 10,
+      ),
+      child: Row(
+        children: [
+          const Icon(
+            Icons.print,
+            size: 28,
+          ),
+          const SizedBox(width: 10),
+          const Text(
+            'Print Color Studio',
+            style: TextStyle(
+              fontSize: 20,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const Spacer(),
+          IconButton(
+            tooltip: 'Undo',
+            onPressed:
+                _historyIndex > 0 && !_processing
+                    ? _undo
+                    : null,
+            icon: const Icon(Icons.undo),
+          ),
+          IconButton(
+            tooltip: 'Redo',
+            onPressed:
+                _historyIndex < _history.length - 1 &&
+                        !_processing
+                    ? _redo
+                    : null,
+            icon: const Icon(Icons.redo),
+          ),
+          const SizedBox(width: 8),
+          OutlinedButton.icon(
+            onPressed:
+                _openingProject ? null : _openProject,
+            icon: _openingProject
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                    ),
+                  )
+                : const Icon(Icons.folder_open),
+            label: const Text('Open Project'),
+          ),
+          const SizedBox(width: 8),
+          OutlinedButton.icon(
+            onPressed:
+                _savingProject ? null : _saveProject,
+            icon: _savingProject
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                    ),
+                  )
+                : const Icon(Icons.save),
+            label: const Text('Save Project'),
+          ),
+          const SizedBox(width: 8),
+          FilledButton.icon(
+            onPressed: _openImage,
+            icon: const Icon(Icons.image),
+            label: const Text('Open Image'),
+          ),
+          const SizedBox(width: 8),
+          FilledButton.icon(
+            onPressed:
+                _processedBytes == null
+                    ? null
+                    : _saveImage,
+            icon: const Icon(Icons.download),
+            label: const Text('Export'),
+          ),
+        ],
       ),
     );
   }
 
-  Widget _slider({
-    required String name,
-    required String shortName,
-    required double value,
-    required ValueChanged<double> onChanged,
-  }) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Container(
-              width: 36,
-              height: 32,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.08),
-                borderRadius: BorderRadius.circular(7),
-              ),
-              child: Text(
-                shortName,
-                style: const TextStyle(
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(name),
-            ),
-            Text(
-              value.toStringAsFixed(0),
-              style: const TextStyle(
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ],
-        ),
-        Slider(
-          value: value,
-          min: -100,
-          max: 100,
-          divisions: 200,
-          onChanged:
-              _originalBytes == null || _processing
-                  ? null
-                  : onChanged,
-        ),
-      ],
-    );
-  }
-
   Widget _buildPreview() {
-    final bytes =
-        _showOriginal ? _originalBytes : _processedBytes;
-
-    if (bytes == null) {
-      return const Center(
+    if (_originalBytes == null) {
+      return Center(
         child: Column(
-          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment:
+              MainAxisAlignment.center,
           children: [
             Icon(
               Icons.image_outlined,
               size: 90,
-              color: Colors.white24,
+              color: Colors.grey.shade600,
             ),
-            SizedBox(height: 18),
-            Text(
-              'No image loaded',
+            const SizedBox(height: 20),
+            const Text(
+              'Open an image to begin',
               style: TextStyle(
                 fontSize: 22,
-                color: Colors.white60,
               ),
             ),
-            SizedBox(height: 8),
+            const SizedBox(height: 8),
             Text(
-              'Open an image to start color correction',
+              'PNG, JPG, JPEG and other supported formats',
               style: TextStyle(
-                color: Colors.white30,
+                color: Colors.grey.shade500,
               ),
             ),
           ],
@@ -335,67 +535,46 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
       );
     }
 
+    final bytes = _showOriginal
+        ? _originalBytes!
+        : (_processedBytes ?? _originalBytes!);
+
     return Stack(
       children: [
         Positioned.fill(
           child: InteractiveViewer(
-            minScale: 0.2,
-            maxScale: 5,
+            minScale: 0.1,
+            maxScale: 8,
             child: Center(
               child: Image.memory(
                 bytes,
                 fit: BoxFit.contain,
-                gaplessPlayback: true,
-              ),
-            ),
-          ),
-        ),
-        Positioned(
-          left: 16,
-          top: 16,
-          child: Container(
-            padding: const EdgeInsets.symmetric(
-              horizontal: 12,
-              vertical: 7,
-            ),
-            decoration: BoxDecoration(
-              color: Colors.black.withValues(alpha: 0.75),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Text(
-              _showOriginal ? 'ORIGINAL' : 'CORRECTED',
-              style: const TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.bold,
+                filterQuality: FilterQuality.high,
               ),
             ),
           ),
         ),
         if (_processing)
-          Positioned(
-            right: 16,
+          const Positioned(
             top: 16,
-            child: Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: 12,
-                vertical: 8,
-              ),
-              decoration: BoxDecoration(
-                color: Colors.black.withValues(alpha: 0.75),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: const Row(
-                children: [
-                  SizedBox(
-                    width: 15,
-                    height: 15,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
+            right: 16,
+            child: Card(
+              child: Padding(
+                padding: EdgeInsets.all(10),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                      ),
                     ),
-                  ),
-                  SizedBox(width: 8),
-                  Text('Processing...'),
-                ],
+                    SizedBox(width: 10),
+                    Text('Processing...'),
+                  ],
+                ),
               ),
             ),
           ),
@@ -403,240 +582,164 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
     );
   }
 
-  Widget _infoRow(String title, String value) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 5),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: 90,
-            child: Text(
-              title,
-              style: const TextStyle(
-                color: Colors.white38,
-                fontSize: 12,
+  Widget _buildSlider({
+    required String label,
+    required double value,
+    required Color color,
+    required ValueChanged<double> onChanged,
+  }) {
+    return Column(
+      crossAxisAlignment:
+          CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Container(
+              width: 12,
+              height: 12,
+              decoration: BoxDecoration(
+                color: color,
+                shape: BoxShape.circle,
               ),
             ),
-          ),
-          Expanded(
-            child: Text(
-              value,
-              style: const TextStyle(fontSize: 12),
-              overflow: TextOverflow.ellipsis,
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                label,
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
             ),
-          ),
-        ],
-      ),
+            SizedBox(
+              width: 60,
+              child: Text(
+                value.toStringAsFixed(0),
+                textAlign: TextAlign.right,
+              ),
+            ),
+          ],
+        ),
+        Slider(
+          value: value.clamp(-100, 100),
+          min: -100,
+          max: 100,
+          divisions: 200,
+          onChanged: _processing
+              ? null
+              : onChanged,
+        ),
+      ],
     );
   }
 
-  Widget _buildPanel() {
+  Widget _buildControls() {
     return Container(
       width: 340,
-      decoration: const BoxDecoration(
-        color: Color(0xFF15181D),
-        border: Border(
-          left: BorderSide(
-            color: Color(0xFF292D33),
-          ),
-        ),
-      ),
+      padding: const EdgeInsets.all(18),
       child: Column(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
         children: [
-          Expanded(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(20),
-              child: Column(
-                crossAxisAlignment:
-                    CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'CMYK CORRECTION',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  const Text(
-                    'Adjust print channels',
-                    style: TextStyle(
-                      color: Colors.white38,
-                      fontSize: 13,
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-
-                  _slider(
-                    name: 'Cyan',
-                    shortName: 'C',
-                    value: _correction.cyan,
-                    onChanged: (v) {
-                      _changeCmyk(cyan: v);
-                    },
-                  ),
-
-                  _slider(
-                    name: 'Magenta',
-                    shortName: 'M',
-                    value: _correction.magenta,
-                    onChanged: (v) {
-                      _changeCmyk(magenta: v);
-                    },
-                  ),
-
-                  _slider(
-                    name: 'Yellow',
-                    shortName: 'Y',
-                    value: _correction.yellow,
-                    onChanged: (v) {
-                      _changeCmyk(yellow: v);
-                    },
-                  ),
-
-                  _slider(
-                    name: 'Black',
-                    shortName: 'K',
-                    value: _correction.black,
-                    onChanged: (v) {
-                      _changeCmyk(black: v);
-                    },
-                  ),
-
-                  const SizedBox(height: 12),
-
-                  Row(
-                    children: [
-                      Expanded(
-                        child: OutlinedButton.icon(
-                          onPressed:
-                              _canUndo &&
-                                      !_processing
-                                  ? _undo
-                                  : null,
-                          icon: const Icon(
-                            Icons.undo,
-                          ),
-                          label: const Text('UNDO'),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: OutlinedButton.icon(
-                          onPressed:
-                              _canRedo &&
-                                      !_processing
-                                  ? _redo
-                                  : null,
-                          icon: const Icon(
-                            Icons.redo,
-                          ),
-                          label: const Text('REDO'),
-                        ),
-                      ),
-                    ],
-                  ),
-
-                  const SizedBox(height: 10),
-
-                  SizedBox(
-                    width: double.infinity,
-                    child: OutlinedButton.icon(
-                      onPressed:
-                          _originalBytes == null ||
-                                  _processing
-                              ? null
-                              : _reset,
-                      icon: const Icon(
-                        Icons.restart_alt,
-                      ),
-                      label: const Text(
-                        'RESET CORRECTION',
-                      ),
-                    ),
-                  ),
-
-                  const SizedBox(height: 24),
-
-                  const Divider(
-                    color: Colors.white12,
-                  ),
-
-                  const SizedBox(height: 20),
-
-                  const Text(
-                    'IMAGE INFORMATION',
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white54,
-                    ),
-                  ),
-
-                  const SizedBox(height: 12),
-
-                  _infoRow(
-                    'File',
-                    _fileName ?? '—',
-                  ),
-
-                  _infoRow(
-                    'Resolution',
-                    _imageWidth != null &&
-                            _imageHeight != null
-                        ? '${_imageWidth} × $_imageHeight'
-                        : '—',
-                  ),
-
-                  const SizedBox(height: 16),
-
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text(
-                      'Show original',
-                    ),
-                    value: _showOriginal,
-                    onChanged:
-                        _originalBytes == null
-                            ? null
-                            : (value) {
-                                setState(() {
-                                  _showOriginal =
-                                      value;
-                                });
-                              },
-                  ),
-                ],
-              ),
+          const Text(
+            'CMYK Correction',
+            style: TextStyle(
+              fontSize: 20,
+              fontWeight: FontWeight.bold,
             ),
           ),
-
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: const BoxDecoration(
-              border: Border(
-                top: BorderSide(
-                  color: Color(0xFF292D33),
+          const SizedBox(height: 20),
+          _buildSlider(
+            label: 'Cyan',
+            value: _correction.cyan,
+            color: Colors.cyan,
+            onChanged: (value) {
+              _changeCmyk(cyan: value);
+            },
+          ),
+          _buildSlider(
+            label: 'Magenta',
+            value: _correction.magenta,
+            color: Colors.pink,
+            onChanged: (value) {
+              _changeCmyk(magenta: value);
+            },
+          ),
+          _buildSlider(
+            label: 'Yellow',
+            value: _correction.yellow,
+            color: Colors.yellow,
+            onChanged: (value) {
+              _changeCmyk(yellow: value);
+            },
+          ),
+          _buildSlider(
+            label: 'Black',
+            value: _correction.black,
+            color: Colors.grey.shade300,
+            onChanged: (value) {
+              _changeCmyk(black: value);
+            },
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed:
+                      _processing ? null : _reset,
+                  icon: const Icon(
+                    Icons.restart_alt,
+                  ),
+                  label: const Text('Reset'),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          const Divider(),
+          const SizedBox(height: 12),
+          const Text(
+            'Preview',
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 8),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Show original'),
+            value: _showOriginal,
+            onChanged: _originalBytes == null
+                ? null
+                : (value) {
+                    setState(() {
+                      _showOriginal = value;
+                    });
+                  },
+          ),
+          const SizedBox(height: 12),
+          if (_fileName != null)
+            Text(
+              _fileName!,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: Colors.grey.shade400,
+              ),
+            ),
+          if (_imageWidth != null &&
+              _imageHeight != null)
+            Padding(
+              padding:
+                  const EdgeInsets.only(top: 6),
+              child: Text(
+                '${_imageWidth} × $_imageHeight px',
+                style: TextStyle(
+                  color: Colors.grey.shade500,
                 ),
               ),
             ),
-            child: SizedBox(
-              width: double.infinity,
-              height: 48,
-              child: FilledButton.icon(
-                onPressed:
-                    _processedBytes == null ||
-                            _processing
-                        ? null
-                        : _saveImage,
-                icon: const Icon(Icons.save),
-                label: const Text(
-                  'EXPORT CORRECTED IMAGE',
-                ),
-              ),
-            ),
-          ),
         ],
       ),
     );
@@ -645,127 +748,61 @@ class _ColorStudioScreenState extends State<ColorStudioScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        toolbarHeight: 64,
-        titleSpacing: 20,
-        title: const Row(
+      body: SafeArea(
+        child: Column(
           children: [
-            Icon(Icons.palette_outlined),
-            SizedBox(width: 12),
-            Text(
-              'PRINT COLOR STUDIO',
-              style: TextStyle(
-                fontWeight: FontWeight.bold,
-                letterSpacing: 0.5,
+            _buildTopBar(),
+            const Divider(height: 1),
+            Expanded(
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Container(
+                      margin: const EdgeInsets.all(12),
+                      clipBehavior:
+                          Clip.antiAlias,
+                      decoration: BoxDecoration(
+                        color:
+                            const Color(0xFF111111),
+                        borderRadius:
+                            BorderRadius.circular(12),
+                        border: Border.all(
+                          color: Colors.white12,
+                        ),
+                      ),
+                      child: _buildPreview(),
+                    ),
+                  ),
+                  const VerticalDivider(
+                    width: 1,
+                  ),
+                  _buildControls(),
+                ],
               ),
             ),
-          ],
-        ),
-        actions: [
-          IconButton(
-            tooltip: 'Undo',
-            onPressed:
-                _canUndo && !_processing
-                    ? _undo
-                    : null,
-            icon: const Icon(Icons.undo),
-          ),
-          IconButton(
-            tooltip: 'Redo',
-            onPressed:
-                _canRedo && !_processing
-                    ? _redo
-                    : null,
-            icon: const Icon(Icons.redo),
-          ),
-          const SizedBox(width: 8),
-          TextButton.icon(
-            onPressed: _openImage,
-            icon: const Icon(
-              Icons.folder_open,
-            ),
-            label: const Text('OPEN'),
-          ),
-          const SizedBox(width: 8),
-          TextButton.icon(
-            onPressed:
-                _processedBytes == null ||
-                        _processing
-                    ? null
-                    : _saveImage,
-            icon: const Icon(
-              Icons.save_outlined,
-            ),
-            label: const Text('SAVE'),
-          ),
-          const SizedBox(width: 12),
-        ],
-      ),
-      body: Row(
-        children: [
-          Expanded(
-            child: Container(
-              margin: const EdgeInsets.fromLTRB(
-                16,
-                16,
-                0,
-                16,
+            Container(
+              padding:
+                  const EdgeInsets.symmetric(
+                horizontal: 16,
+                vertical: 8,
               ),
-              decoration: BoxDecoration(
-                color: const Color(0xFF111318),
-                borderRadius:
-                    BorderRadius.circular(12),
-                border: Border.all(
-                  color: const Color(0xFF292D33),
-                ),
-              ),
-              clipBehavior:
-                  Clip.antiAlias,
-              child: _buildPreview(),
-            ),
-          ),
-          _buildPanel(),
-        ],
-      ),
-      bottomNavigationBar: Container(
-        height: 30,
-        padding:
-            const EdgeInsets.symmetric(
-          horizontal: 14,
-        ),
-        color: const Color(0xFF0A0C0F),
-        child: Row(
-          children: [
-            Icon(
-              Icons.circle,
-              size: 8,
-              color: _processing
-                  ? Colors.orangeAccent
-                  : Colors.greenAccent,
-            ),
-            const SizedBox(width: 8),
-            Text(
-              _processing
-                  ? 'PROCESSING'
-                  : 'READY',
-              style: const TextStyle(
-                fontSize: 11,
-                color: Colors.white54,
-              ),
-            ),
-            const Spacer(),
-            Text(
-              _history.length > 1
-                  ? 'History: ${_historyIndex + 1}/${_history.length}'
-                  : 'No changes',
-              style: const TextStyle(
-                fontSize: 11,
-                color: Colors.white38,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
+              child: Row(
+                children: [
+                  Icon(
+                    _originalBytes == null
+                        ? Icons.circle_outlined
+                        : Icons.check_circle,
+                    size: 16,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    _originalBytes == null
+                        ? 'No image loaded'
+                        : 'Image loaded',
+                  ),
+                  const Spacer(),
+                  Text(
+                    'C ${_correction.cyan.toStringAsFixed(0)}  '
+                    'M ${_correction.magenta.toStringAsFixed(0)}  '
+                    'Y ${_correction.yellow.toStringAsFixed(0)}  '
+                    'K ${_correction.black.toStringAs
