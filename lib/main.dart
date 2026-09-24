@@ -25,8 +25,8 @@ class PrintColorStudioApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
-        useMaterial3: true,
         colorSchemeSeed: Colors.blue,
+        useMaterial3: true,
       ),
       home: const ColorStudioPage(),
     );
@@ -73,38 +73,35 @@ class _ColorStudioPageState extends State<ColorStudioPage> {
       return;
     }
 
-    final file = result.files.single;
+    final selected = result.files.single;
 
-    Uint8List? bytes = file.bytes;
+    Uint8List? bytes = selected.bytes;
 
-    if (bytes == null && file.path != null) {
-      bytes = await File(file.path!).readAsBytes();
+    if (bytes == null && selected.path != null) {
+      bytes = await File(selected.path!).readAsBytes();
     }
 
     if (bytes == null) {
-      _showMessage('Не удалось прочитать изображение.');
+      _showMessage('Не удалось открыть изображение');
       return;
     }
 
     final decoded = img.decodeImage(bytes);
 
     if (decoded == null) {
-      _showMessage(
-        'Файл не является поддерживаемым изображением.',
-      );
+      _showMessage('Файл изображения повреждён или не поддерживается');
       return;
     }
 
     setState(() {
       _originalBytes = bytes;
       _processedBytes = bytes;
-      _fileName = file.name;
-      _sourcePath = file.path;
+      _fileName = selected.name;
+      _sourcePath = selected.path;
       _imageWidth = decoded.width;
       _imageHeight = decoded.height;
 
       _correction = CorrectionState.zero;
-
       _history
         ..clear()
         ..add(CorrectionState.zero);
@@ -112,6 +109,8 @@ class _ColorStudioPageState extends State<ColorStudioPage> {
       _historyIndex = 0;
       _showOriginal = false;
     });
+
+    _showMessage('Изображение загружено');
   }
 
   Future<void> _openProject() async {
@@ -127,84 +126,77 @@ class _ColorStudioPageState extends State<ColorStudioPage> {
       final project = await ProjectService.openProject();
 
       if (project == null) {
-        _showMessage('Не удалось открыть проект.');
         return;
       }
 
-      Uint8List? imageBytes;
+      Uint8List? bytes;
 
-      if (project.sourcePath != null &&
-          project.sourcePath!.isNotEmpty) {
-        final sourceFile = File(project.sourcePath!);
+      if (project.sourcePath != null) {
+        final file = File(project.sourcePath!);
 
-        if (await sourceFile.exists()) {
-          imageBytes = await sourceFile.readAsBytes();
+        if (await file.exists()) {
+          bytes = await file.readAsBytes();
         }
       }
 
-      final correction = CorrectionState(
-        cyan: project.cyan,
-        magenta: project.magenta,
-        yellow: project.yellow,
-        black: project.black,
-      );
+      if (bytes == null) {
+        _showMessage(
+          'Проект открыт, но исходное изображение не найдено',
+        );
 
-      if (imageBytes == null) {
         setState(() {
           _fileName = project.fileName;
           _sourcePath = project.sourcePath;
           _imageWidth = project.width;
           _imageHeight = project.height;
 
-          _correction = correction;
+          _correction = CorrectionState(
+            cyan: project.cyan,
+            magenta: project.magenta,
+            yellow: project.yellow,
+            black: project.black,
+          );
 
           _history
             ..clear()
-            ..add(correction);
+            ..add(_correction);
 
           _historyIndex = 0;
         });
 
-        _showMessage(
-          'Проект открыт, но исходное изображение не найдено.',
-        );
-
         return;
       }
 
-      final decoded = img.decodeImage(imageBytes);
-
-      if (decoded == null) {
-        _showMessage('Исходное изображение повреждено.');
-        return;
-      }
+      final decoded = img.decodeImage(bytes);
 
       setState(() {
-        _originalBytes = imageBytes;
-        _processedBytes = imageBytes;
+        _originalBytes = bytes;
+        _processedBytes = bytes;
 
         _fileName = project.fileName;
         _sourcePath = project.sourcePath;
 
-        _imageWidth = decoded.width;
-        _imageHeight = decoded.height;
+        _imageWidth = decoded?.width ?? project.width;
+        _imageHeight = decoded?.height ?? project.height;
 
-        _correction = correction;
+        _correction = CorrectionState(
+          cyan: project.cyan,
+          magenta: project.magenta,
+          yellow: project.yellow,
+          black: project.black,
+        );
 
         _history
           ..clear()
-          ..add(correction);
+          ..add(_correction);
 
         _historyIndex = 0;
         _showOriginal = false;
       });
 
-      await _applyCorrection(
-        correction,
-        addToHistory: false,
-      );
+      await _applyCorrection();
 
-      _showMessage('Проект открыт.');
+      _showMessage('Проект открыт');
     } finally {
       if (mounted) {
         setState(() {
@@ -212,13 +204,11 @@ class _ColorStudioPageState extends State<ColorStudioPage> {
         });
       }
     }
-  }
-
-  Future<void> _saveProject() async {
+  }  Future<void> _saveProject() async {
     if (_fileName == null ||
         _imageWidth == null ||
         _imageHeight == null) {
-      _showMessage('Сначала откройте изображение.');
+      _showMessage('Сначала откройте изображение');
       return;
     }
 
@@ -246,7 +236,7 @@ class _ColorStudioPageState extends State<ColorStudioPage> {
       final saved = await ProjectService.saveProject(project);
 
       if (saved) {
-        _showMessage('Проект сохранён.');
+        _showMessage('Проект сохранён');
       }
     } finally {
       if (mounted) {
@@ -257,10 +247,7 @@ class _ColorStudioPageState extends State<ColorStudioPage> {
     }
   }
 
-  Future<void> _applyCorrection(
-    CorrectionState correction, {
-    bool addToHistory = true,
-  }) async {
+  Future<void> _applyCorrection() async {
     if (_originalBytes == null) {
       return;
     }
@@ -269,47 +256,20 @@ class _ColorStudioPageState extends State<ColorStudioPage> {
       _processing = true;
     });
 
-    final result = await Future<Uint8List?>(
-      () {
-        return CmykProcessor.apply(
-          _originalBytes!,
-          cyan: correction.cyan,
-          magenta: correction.magenta,
-          yellow: correction.yellow,
-          black: correction.black,
-        );
-      },
+    final result = CmykProcessor.apply(
+      _originalBytes!,
+      cyan: _correction.cyan,
+      magenta: _correction.magenta,
+      yellow: _correction.yellow,
+      black: _correction.black,
     );
 
     if (!mounted) {
       return;
     }
 
-    if (result == null) {
-      setState(() {
-        _processing = false;
-      });
-
-      _showMessage('Ошибка обработки изображения.');
-      return;
-    }
-
     setState(() {
       _processedBytes = result;
-      _correction = correction;
-
-      if (addToHistory) {
-        if (_historyIndex < _history.length - 1) {
-          _history.removeRange(
-            _historyIndex + 1,
-            _history.length,
-          );
-        }
-
-        _history.add(correction);
-        _historyIndex = _history.length - 1;
-      }
-
       _processing = false;
     });
   }
@@ -327,49 +287,62 @@ class _ColorStudioPageState extends State<ColorStudioPage> {
       black: black ?? _correction.black,
     );
 
-    await _applyCorrection(next);
+    if (next.cyan == _correction.cyan &&
+        next.magenta == _correction.magenta &&
+        next.yellow == _correction.yellow &&
+        next.black == _correction.black) {
+      return;
+    }
+
+    setState(() {
+      _correction = next;
+
+      if (_historyIndex < _history.length - 1) {
+        _history.removeRange(
+          _historyIndex + 1,
+          _history.length,
+        );
+      }
+
+      _history.add(next);
+      _historyIndex = _history.length - 1;
+    });
+
+    await _applyCorrection();
   }
 
   Future<void> _undo() async {
-    if (_historyIndex <= 0 || _processing) {
+    if (_historyIndex <= 0) {
       return;
     }
 
-    final index = _historyIndex - 1;
-    final correction = _history[index];
-
     setState(() {
-      _historyIndex = index;
+      _historyIndex--;
+      _correction = _history[_historyIndex];
     });
 
-    await _applyCorrection(
-      correction,
-      addToHistory: false,
-    );
+    await _applyCorrection();
   }
 
   Future<void> _redo() async {
-    if (_historyIndex >= _history.length - 1 ||
-        _processing) {
+    if (_historyIndex >= _history.length - 1) {
       return;
     }
 
-    final index = _historyIndex + 1;
-    final correction = _history[index];
-
     setState(() {
-      _historyIndex = index;
+      _historyIndex++;
+      _correction = _history[_historyIndex];
     });
 
-    await _applyCorrection(
-      correction,
-      addToHistory: false,
-    );
+    await _applyCorrection();
   }
 
   Future<void> _reset() async {
-    await _applyCorrection(
-      CorrectionState.zero,
+    await _changeCmyk(
+      cyan: 0,
+      magenta: 0,
+      yellow: 0,
+      black: 0,
     );
   }
 
@@ -390,20 +363,20 @@ class _ColorStudioPageState extends State<ColorStudioPage> {
   }
 
   Future<void> _saveImage() async {
-    if (_processedBytes == null) {
-      _showMessage('Сначала откройте изображение.');
+    if (_processedBytes == null || _fileName == null) {
+      _showMessage('Сначала откройте изображение');
       return;
     }
 
-    final baseName = _fileName == null
-        ? 'corrected_image'
-        : _fileName!.replaceFirst(
-            RegExp(r'\.[^.]+$'),
-            '',
-          );
+    final baseName = _fileName!.contains('.')
+        ? _fileName!.substring(
+            0,
+            _fileName!.lastIndexOf('.'),
+          )
+        : _fileName!;
 
     final path = await FilePicker.platform.saveFile(
-      dialogTitle: 'Save corrected image',
+      dialogTitle: 'Export corrected image',
       fileName: '${baseName}_corrected.png',
       type: FileType.custom,
       allowedExtensions: ['png'],
@@ -418,7 +391,7 @@ class _ColorStudioPageState extends State<ColorStudioPage> {
       flush: true,
     );
 
-    _showMessage('Изображение сохранено.');
+    _showMessage('Изображение экспортировано');
   }
 
   void _showMessage(String message) {
@@ -431,20 +404,27 @@ class _ColorStudioPageState extends State<ColorStudioPage> {
       ..showSnackBar(
         SnackBar(
           content: Text(message),
+          duration: const Duration(seconds: 2),
         ),
       );
-  }
-
-  Widget _buildTopBar() {
+  }  Widget _buildTopBar() {
     return Container(
       padding: const EdgeInsets.symmetric(
-        horizontal: 16,
-        vertical: 10,
+        horizontal: 18,
+        vertical: 12,
+      ),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.04),
+        border: const Border(
+          bottom: BorderSide(
+            color: Colors.white12,
+          ),
+        ),
       ),
       child: Row(
         children: [
           const Icon(
-            Icons.print,
+            Icons.colorize,
             size: 28,
           ),
           const SizedBox(width: 10),
@@ -455,53 +435,28 @@ class _ColorStudioPageState extends State<ColorStudioPage> {
               fontWeight: FontWeight.bold,
             ),
           ),
-          const Spacer(),
+          const SizedBox(width: 28),
           IconButton(
             tooltip: 'Undo',
-            onPressed:
-                _historyIndex > 0 && !_processing
-                    ? _undo
-                    : null,
+            onPressed: _historyIndex > 0 ? _undo : null,
             icon: const Icon(Icons.undo),
           ),
           IconButton(
             tooltip: 'Redo',
             onPressed:
-                _historyIndex < _history.length - 1 &&
-                        !_processing
-                    ? _redo
-                    : null,
+                _historyIndex < _history.length - 1 ? _redo : null,
             icon: const Icon(Icons.redo),
           ),
-          const SizedBox(width: 8),
+          const Spacer(),
           OutlinedButton.icon(
-            onPressed: _openingProject
-                ? null
-                : _openProject,
-            icon: _openingProject
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                    ),
-                  )
-                : const Icon(Icons.folder_open),
+            onPressed: _openingProject ? null : _openProject,
+            icon: const Icon(Icons.folder_open),
             label: const Text('Open Project'),
           ),
           const SizedBox(width: 8),
           OutlinedButton.icon(
-            onPressed:
-                _savingProject ? null : _saveProject,
-            icon: _savingProject
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                    ),
-                  )
-                : const Icon(Icons.save),
+            onPressed: _savingProject ? null : _saveProject,
+            icon: const Icon(Icons.save),
             label: const Text('Save Project'),
           ),
           const SizedBox(width: 8),
@@ -512,10 +467,7 @@ class _ColorStudioPageState extends State<ColorStudioPage> {
           ),
           const SizedBox(width: 8),
           FilledButton.icon(
-            onPressed:
-                _processedBytes == null
-                    ? null
-                    : _saveImage,
+            onPressed: _processedBytes == null ? null : _saveImage,
             icon: const Icon(Icons.download),
             label: const Text('Export'),
           ),
@@ -526,43 +478,67 @@ class _ColorStudioPageState extends State<ColorStudioPage> {
 
   Widget _buildPreview() {
     if (_originalBytes == null) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.image_outlined,
-              size: 90,
-              color: Colors.grey.shade600,
-            ),
-            const SizedBox(height: 20),
-            const Text(
-              'Open an image to begin',
-              style: TextStyle(fontSize: 22),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'PNG, JPG, JPEG and other supported formats',
-              style: TextStyle(
-                color: Colors.grey.shade500,
+      return Container(
+        width: double.infinity,
+        height: double.infinity,
+        decoration: BoxDecoration(
+          color: Colors.black26,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: Colors.white12,
+          ),
+        ),
+        child: const Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.image_outlined,
+                size: 72,
+                color: Colors.white38,
               ),
-            ),
-          ],
+              SizedBox(height: 18),
+              Text(
+                'Open an image to begin',
+                style: TextStyle(
+                  fontSize: 20,
+                  color: Colors.white70,
+                ),
+              ),
+              SizedBox(height: 8),
+              Text(
+                'PNG, JPG, JPEG and other supported formats',
+                style: TextStyle(
+                  color: Colors.white38,
+                ),
+              ),
+            ],
+          ),
         ),
       );
     }
 
-    final Uint8List bytes = _showOriginal
+    final bytes = _showOriginal
         ? _originalBytes!
         : (_processedBytes ?? _originalBytes!);
 
-    return Stack(
-      children: [
-        Positioned.fill(
-          child: InteractiveViewer(
-            minScale: 0.1,
-            maxScale: 8,
-            child: Center(
+    return Container(
+      width: double.infinity,
+      height: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.black26,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: Colors.white12,
+        ),
+      ),
+      child: Stack(
+        children: [
+          Center(
+            child: InteractiveViewer(
+              minScale: 0.1,
+              maxScale: 8,
               child: Image.memory(
                 bytes,
                 fit: BoxFit.contain,
@@ -570,32 +546,35 @@ class _ColorStudioPageState extends State<ColorStudioPage> {
               ),
             ),
           ),
-        ),
-        if (_processing)
-          const Positioned(
-            top: 16,
-            right: 16,
-            child: Card(
-              child: Padding(
-                padding: EdgeInsets.all(10),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
+          if (_processing)
+            const Positioned(
+              top: 12,
+              right: 12,
+              child: Card(
+                child: Padding(
+                  padding: EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                        ),
                       ),
-                    ),
-                    SizedBox(width: 10),
-                    Text('Processing...'),
-                  ],
+                      SizedBox(width: 8),
+                      Text('Processing...'),
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
-      ],
+        ],
+      ),
     );
   }
 
@@ -603,6 +582,14 @@ class _ColorStudioPageState extends State<ColorStudioPage> {
     return Container(
       width: 360,
       padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.04),
+        border: const Border(
+          left: BorderSide(
+            color: Colors.white12,
+          ),
+        ),
+      ),
       child: SingleChildScrollView(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -610,12 +597,18 @@ class _ColorStudioPageState extends State<ColorStudioPage> {
             const Text(
               'CMYK Correction',
               style: TextStyle(
-                fontSize: 20,
+                fontSize: 21,
                 fontWeight: FontWeight.bold,
               ),
             ),
-            const SizedBox(height: 20),
-
+            const SizedBox(height: 5),
+            const Text(
+              'Adjust print colors',
+              style: TextStyle(
+                color: Colors.white54,
+              ),
+            ),
+            const SizedBox(height: 24),
             CmykChannelControl(
               label: 'Cyan',
               value: _correction.cyan,
@@ -623,13 +616,9 @@ class _ColorStudioPageState extends State<ColorStudioPage> {
               onChanged: (value) {
                 _changeCmyk(cyan: value);
               },
-              onReset: _originalBytes == null
-                  ? null
-                  : _resetCyan,
+              onReset: _resetCyan,
             ),
-
-            const SizedBox(height: 14),
-
+            const SizedBox(height: 18),
             CmykChannelControl(
               label: 'Magenta',
               value: _correction.magenta,
@@ -637,13 +626,9 @@ class _ColorStudioPageState extends State<ColorStudioPage> {
               onChanged: (value) {
                 _changeCmyk(magenta: value);
               },
-              onReset: _originalBytes == null
-                  ? null
-                  : _resetMagenta,
+              onReset: _resetMagenta,
             ),
-
-            const SizedBox(height: 14),
-
+            const SizedBox(height: 18),
             CmykChannelControl(
               label: 'Yellow',
               value: _correction.yellow,
@@ -651,59 +636,43 @@ class _ColorStudioPageState extends State<ColorStudioPage> {
               onChanged: (value) {
                 _changeCmyk(yellow: value);
               },
-              onReset: _originalBytes == null
-                  ? null
-                  : _resetYellow,
+              onReset: _resetYellow,
             ),
-
-            const SizedBox(height: 14),
-
+            const SizedBox(height: 18),
             CmykChannelControl(
               label: 'Black',
               value: _correction.black,
-              color: Colors.grey.shade300,
+              color: Colors.black,
               onChanged: (value) {
                 _changeCmyk(black: value);
               },
-              onReset: _originalBytes == null
-                  ? null
-                  : _resetBlack,
+              onReset: _resetBlack,
             ),
-
             const SizedBox(height: 18),
-
             SizedBox(
               width: double.infinity,
               child: OutlinedButton.icon(
-                onPressed:
-                    _processing || _originalBytes == null
-                        ? null
-                        : _reset,
-                icon: const Icon(Icons.restart_alt),
+                onPressed: _reset,
+                icon: const Icon(Icons.refresh),
                 label: const Text('Reset All Channels'),
               ),
             ),
-
-            const SizedBox(height: 20),
+            const SizedBox(height: 24),
             const Divider(),
-            const SizedBox(height: 12),
-
+            const SizedBox(height: 18),
             const Text(
               'Preview',
               style: TextStyle(
+                fontSize: 17,
                 fontWeight: FontWeight.bold,
               ),
             ),
-
-            const SizedBox(height: 8),
-
+            const SizedBox(height: 10),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
-              title: const Text('Show original'),
-              subtitle: Text(
-                _showOriginal
-                    ? 'Original image'
-                    : 'Corrected image',
+              title: const Text('Show Original'),
+              subtitle: const Text(
+                'Compare original and corrected image',
               ),
               value: _showOriginal,
               onChanged: _originalBytes == null
@@ -714,67 +683,117 @@ class _ColorStudioPageState extends State<ColorStudioPage> {
                       });
                     },
             ),
-
-            const SizedBox(height: 12),
-
+            const SizedBox(height: 18),
             const Divider(),
-
-            const SizedBox(height: 12),
-
+            const SizedBox(height: 18),
             const Text(
               'File Information',
               style: TextStyle(
+                fontSize: 17,
                 fontWeight: FontWeight.bold,
               ),
             ),
-
-            const SizedBox(height: 8),
-
-            if (_fileName != null)
-              Text(
-                _fileName!,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: Colors.grey.shade300,
-                ),
-              ),
-
-            if (_imageWidth != null &&
-                _imageHeight != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Text(
-                  '${_imageWidth!} × ${_imageHeight!} px',
-                  style: TextStyle(
-                    color: Colors.grey.shade500,
-                  ),
-                ),
-              ),
-
-            const SizedBox(height: 14),
-
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.04),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text(
-                'C ${_correction.cyan.toStringAsFixed(0)}%   '
-                'M ${_correction.magenta.toStringAsFixed(0)}%   '
-                'Y ${_correction.yellow.toStringAsFixed(0)}%   '
-                'K ${_correction.black.toStringAsFixed(0)}%',
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
+            const SizedBox(height: 12),
+            _infoRow(
+              'File',
+              _fileName ?? 'No image',
             ),
+            _infoRow(
+              'Size',
+              _imageWidth != null && _imageHeight != null
+                  ? '${_imageWidth!} × ${_imageHeight!} px'
+                  : '—',
+            ),
+            const SizedBox(height: 18),
+            const Divider(),
+            const SizedBox(height: 14),
+            _buildStatusRow(),
           ],
         ),
       ),
+    );
+  }
+
+  Widget _infoRow(String title, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 55,
+            child: Text(
+              title,
+              style: const TextStyle(
+                color: Colors.white54,
+                fontSize: 12,
+              ),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontSize: 12,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStatusRow() {
+    return Row(
+      children: [
+        Expanded(
+          child: _statusValue(
+            'C',
+            _correction.cyan,
+          ),
+        ),
+        Expanded(
+          child: _statusValue(
+            'M',
+            _correction.magenta,
+          ),
+        ),
+        Expanded(
+          child: _statusValue(
+            'Y',
+            _correction.yellow,
+          ),
+        ),
+        Expanded(
+          child: _statusValue(
+            'K',
+            _correction.black,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _statusValue(String label, double value) {
+    return Column(
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            color: Colors.white54,
+            fontSize: 11,
+          ),
+        ),
+        const SizedBox(height: 3),
+        Text(
+          '${value >= 0 ? '+' : ''}${value.toStringAsFixed(0)}%',
+          style: const TextStyle(
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ],
     );
   }
 
@@ -785,66 +804,58 @@ class _ColorStudioPageState extends State<ColorStudioPage> {
         child: Column(
           children: [
             _buildTopBar(),
-            const Divider(height: 1),
             Expanded(
               child: Row(
                 children: [
                   Expanded(
-                    child: Container(
-                      margin: const EdgeInsets.all(12),
-                      clipBehavior: Clip.antiAlias,
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF111111),
-                        borderRadius:
-                            BorderRadius.circular(12),
-                        border: Border.all(
-                          color: Colors.white12,
-                        ),
-                      ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(18),
                       child: _buildPreview(),
                     ),
                   ),
-                  const VerticalDivider(width: 1),
                   _buildControls(),
                 ],
               ),
             ),
             Container(
+              height: 34,
               padding: const EdgeInsets.symmetric(
-                horizontal: padding: const EdgeInsets.symmetric(
-  horizontal: 16,
-  vertical: 8,
-),
-child: Row(
-  children: [
-    Icon(
-      _originalBytes == null
-          ? Icons.circle_outlined
-          : Icons.check_circle,
-      size: 16,
-    ),
-    const SizedBox(width: 8),
-    Text(
-      _originalBytes == null
-          ? 'No image loaded'
-          : 'Image loaded',
-    ),
-    const Spacer(),
-    Text(
-      'C ${_correction.cyan.toStringAsFixed(0)}  '
-      'M ${_correction.magenta.toStringAsFixed(0)}  '
-      'Y ${_correction.yellow.toStringAsFixed(0)}  '
-      'K ${_correction.black.toStringAsFixed(0)}',
-      style: TextStyle(
-        color: Colors.grey.shade400,
+                horizontal: 18,
+              ),
+              decoration: const BoxDecoration(
+                border: Border(
+                  top: BorderSide(
+                    color: Colors.white12,
+                  ),
+                ),
+              ),
+              child: Row(
+                children: [
+                  const Text(
+                    'Print Color Studio',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Colors.white38,
+                    ),
+                  ),
+                  const Spacer(),
+                  Text(
+                    _processing
+                        ? 'Processing...'
+                        : _originalBytes == null
+                            ? 'Ready'
+                            : 'Ready',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: Colors.white38,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
-    ),
-  ],
-),
-),
-],
-),
-),
-);
+    );
   }
-            }
+}
